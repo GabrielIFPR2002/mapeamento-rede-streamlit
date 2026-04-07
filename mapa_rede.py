@@ -6,7 +6,7 @@ import igraph as ig
 import random
 
 
-SENHA_ACESSO = "1234"  # Senha para a aba privada
+SENHA_ACESSO = st.secrets["SENHA_ACESSO"]  # Senha para a aba privada
 
 
 # =========================================
@@ -134,30 +134,28 @@ def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
                 id_num = dados_anon["id"]
                 ger = dados_anon["gerencia"]
 
-                texto_exibicao.append(str(id_num))  # número no nó
-                # HTML real no hover (sem escapar)
+                texto_exibicao.append(str(id_num))
                 hover_info.append(
-                    f"<b>Usuário Anônimo</b><br>"
-                    f"Identificador: {ger}-{id_num}<br>"
-                    f"Área: {ger}<br>"
-                    f"Total de Conexões: {total_conexoes}<br>"
-                    f"Como Entrevistado: {conexoes_como_entrevistado}<br>"
+                    f"&lt;b&gt;Usuário Anônimo&lt;/b&gt;&lt;br&gt;"
+                    f"Identificador: {ger}-{id_num}&lt;br&gt;"
+                    f"Área: {ger}&lt;br&gt;"
+                    f"Total de Conexões: {total_conexoes}&lt;br&gt;"
+                    f"Como Entrevistado: {conexoes_como_entrevistado}&lt;br&gt;"
                     f"Como Alvo: {conexoes_como_alvo}"
                 )
             else:
                 texto_exibicao.append(obter_iniciais(nome))
                 hover_info.append(
-                    f"<b>{nome}</b><br>"
-                    f"Gerência: {gerencia_pessoa}<br>"
-                    f"Total de Conexões: {total_conexoes}<br>"
-                    f"Como Entrevistado: {conexoes_como_entrevistado}<br>"
+                    f"&lt;b&gt;{nome}&lt;/b&gt;&lt;br&gt;"
+                    f"Gerência: {gerencia_pessoa}&lt;br&gt;"
+                    f"Total de Conexões: {total_conexoes}&lt;br&gt;"
+                    f"Como Entrevistado: {conexoes_como_entrevistado}&lt;br&gt;"
                     f"Como Alvo: {conexoes_como_alvo}"
                 )
 
-        # Layout de nós: fixa a posição para manter estabilidade entre renderizações
         if "layout_posicoes" not in st.session_state:
             random.seed(42)
-            layout = g.layout("fr")  # Fruchterman-Reingold
+            layout = g.layout("fr")
             st.session_state["layout_posicoes"] = [(pos[0], pos[1]) for pos in layout]
 
         layout = st.session_state["layout_posicoes"]
@@ -165,7 +163,6 @@ def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
         node_x = [pos[0] for pos in layout]
         node_y = [pos[1] for pos in layout]
 
-        # Coordenadas das arestas
         edge_x, edge_y = [], []
         for edge in g.es:
             x1, y1 = layout[edge.source]
@@ -173,10 +170,8 @@ def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
             edge_x.extend([x1, x2, None])
             edge_y.extend([y1, y2, None])
 
-        # Figura
         fig = go.Figure()
 
-        # Arestas
         fig.add_trace(
             go.Scatter(
                 x=edge_x,
@@ -185,11 +180,10 @@ def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
                 line=dict(color='rgba(100,100,100,0.5)', width=1),
                 hoverinfo='skip',
                 showlegend=False,
-                name=''  # sem nome para evitar rótulos indesejados
+                name=''
             )
         )
 
-        # Nós
         fig.add_trace(
             go.Scatter(
                 x=node_x,
@@ -204,13 +198,12 @@ def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
                     color=cores_nos,
                     line=dict(width=1, color='white')
                 ),
-                hovertemplate='%{hovertext}<extra></extra>',  # <<< remove "trace 1" e não imprime "extra"
+                hovertemplate='%{hovertext}&lt;extra&gt;&lt;/extra&gt;',
                 showlegend=False,
-                name=''  # sem nome para não aparecer título no hover
+                name=''
             )
         )
 
-        # Legenda por gerência (um trace "fake" por cor)
         for ger in gerencias:
             fig.add_trace(
                 go.Scatter(
@@ -244,7 +237,6 @@ def main():
     st.set_page_config(page_title="Mapeamento de Rede", layout="wide")
     st.title("🕸️ Mapeamento de Relacionamentos")
 
-    # Sidebar: instruções
     with st.sidebar:
         st.header("📋 Instruções")
         st.markdown("""
@@ -252,70 +244,41 @@ def main():
 
         O arquivo deve conter as seguintes colunas:
 
-        - `Entrevistado`: Nome da pessoa que fez a indicação  
-        - `Alvo`: Nome da pessoa indicada  
-        - `Gerencia`: Gerência da pessoa
-
-        **Exemplo:**
-        ```
-        Entrevistado,Alvo,Gerencia
-        João Silva,Maria Santos,TI
-        Maria Santos,Pedro Costa,RH
-        ```
+        - `Entrevistado`  
+        - `Alvo`  
+        - `Gerencia`
         """)
-        st.markdown("---")
-        st.markdown("**💡 Dica:** O tamanho dos nós representa o número de vezes que a pessoa foi **Alvo**.")
 
-    # Upload
     uploaded_file = st.file_uploader("📁 Carregue o arquivo CSV", type=['csv'])
 
     if uploaded_file:
-        # Leitura robusta (UTF-8-BOM e fallback Latin-1)
         try:
             df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
         except Exception:
             df = pd.read_csv(uploaded_file, encoding='latin1')
 
-        # Validação mínima de colunas
-        colunas_necessarias = {'Entrevistado', 'Alvo', 'Gerencia'}
-        if not colunas_necessarias.issubset(set(df.columns)):
-            st.error(f"As colunas obrigatórias são: {sorted(colunas_necessarias)}. Encontrado: {list(df.columns)}")
-            return
-
-        # Mapa anônimo
         mapa_anonimo = gerar_mapa_anonimo_por_gerencia(df)
 
-        # Abas
-        tab_publica, tab_privada = st.tabs(["🔒 Aba Pública (Anônima)", "🔑 Aba Privada (Nomes Reais)"])
+        tab_publica, tab_privada = st.tabs(
+            ["🔒 Aba Pública (Anônima)", "🔑 Aba Privada (Nomes Reais)"]
+        )
 
-        # Aba pública
         with tab_publica:
-            st.subheader("Visualização Protegida")
-            st.info("Nesta aba, os nomes são substituídos por IDs para preservar a privacidade.")
-            fig_anon = criar_grafico_rede(df, mapa_anonimo, modo_privacidade=True)
+            fig_anon = criar_grafico_rede(df, mapa_anonimo, True)
             if fig_anon:
                 st.plotly_chart(fig_anon, use_container_width=True)
 
-        # Aba privada
         with tab_privada:
-            st.subheader("Área Administrativa")
-            senha = st.text_input("Insira a senha para ver os nomes reais:", type="password")
+            senha = st.text_input("Insira a senha:", type="password")
 
             if senha == SENHA_ACESSO:
-                st.success("Senha correta! Exibindo dados identificados.")
-                fig_real = criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False)
+                fig_real = criar_grafico_rede(df, mapa_anonimo, False)
                 if fig_real:
                     st.plotly_chart(fig_real, use_container_width=True)
-                st.subheader("📊 Dados Inseridos")
-                st.dataframe(df, use_container_width=True)
-            elif senha == "":
-                st.warning("Por favor, digite a senha para liberar o gráfico.")
-            else:
+                st.dataframe(df)
+            elif senha:
                 st.error("Senha incorreta.")
 
 
-# =========================================
-# Execução
-# =========================================
 if __name__ == "__main__":
     main()
