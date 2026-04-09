@@ -4,229 +4,268 @@ import numpy as np
 import plotly.graph_objects as go
 import igraph as ig
 import random
+import hashlib
+
+SENHA_ACESSO = st.secrets["SENHA_ACESSO"]
 
 
-SENHA_ACESSO = st.secrets["SENHA_ACESSO"]  # Senha para a aba privada
+# =========================================================
+# Utilidades
+# =========================================================
+
+def norm(x):
+    """Padroniza texto: remove espaços e transforma vazio em NaN."""
+    if pd.isna(x):
+        return np.nan
+    s = str(x).strip()
+    return np.nan if s == "" else s
 
 
-# =========================================
-# Funções auxiliares
-# =========================================
 def obter_iniciais(nome_completo):
-    ignorar = ['de', 'da', 'do', 'das', 'dos', 'e']
+    """Gera iniciais ignorando conectivos comuns."""
+    ignorar = {"de", "da", "do", "das", "dos", "e"}
     palavras = str(nome_completo).split()
-    iniciais = [p[0].upper() for p in palavras if p.lower() not in ignorar]
-    return "".join(iniciais)
+    return "".join([p[0].upper() for p in palavras if p.lower() not in ignorar])
 
 
-def gerar_mapa_gerencia_pessoa(df):
-    
+def assinatura_grafo(vertices, edges):
+    """
+    Cria uma assinatura estável do grafo.
+    Se mudar conjunto de nós/arestas, recalculamos o layout (evita index out of range).
+    """
+    v_sorted = sorted(vertices)
+    e_sorted = sorted((min(a, b), max(a, b)) for a, b in edges)
+    payload = str((v_sorted, e_sorted)).encode("utf-8")
+    return hashlib.md5(payload).hexdigest()
+
+
+# =========================================================
+# Mapas de atributos (Coordenação / PRN / Anônimo)
+# =========================================================
+
+def gerar_mapa_coordenacao(df):
+    """
+    Coordenação por pessoa com as colunas corretas:
+    - Entrevistado -> 'Coordenação'
+    - Alvo         -> 'Coord do Alvo'
+
+    Se a pessoa aparecer em ambos, escolhe a coordenação mais frequente (modo).
+    Em caso de empate, prioriza a coordenação do Entrevistado.
+    """
     mapa = {}
+    pessoas = pd.unique(df[["Entrevistado", "Alvo"]].values.ravel("K"))
 
-    pessoas = pd.unique(df[['Entrevistado', 'Alvo']].values.ravel('K'))
-
-    for pessoa in pessoas:
-        if pd.isna(pessoa):
+    for p in pessoas:
+        if pd.isna(p):
             continue
 
-        linhas = df[
-            (df['Entrevistado'] == pessoa) | (df['Alvo'] == pessoa)
-        ]['Gerencia'].dropna()
+        coords_ent = df.loc[df["Entrevistado"] == p, "Coordenação"].dropna()
+        coords_alv = df.loc[df["Alvo"] == p, "Coord do Alvo"].dropna()
+        coords = pd.concat([coords_ent, coords_alv], ignore_index=True)
 
-        if linhas.empty:
-            mapa[pessoa] = 'Sem Gerência'
-        else:
-            mapa[pessoa] = linhas.value_counts().idxmax()
+        if coords.empty:
+            mapa[p] = "Sem Coordenação"
+            continue
+
+        cont = coords.value_counts()
+        top = cont.max()
+        candidatos = cont[cont == top].index.tolist()
+
+        # Empate: tenta priorizar coord do entrevistado
+        escolhido = None
+        if not coords_ent.empty:
+            modo_ent = coords_ent.value_counts().idxmax()
+            if modo_ent in candidatos:
+                escolhido = modo_ent
+
+        mapa[p] = escolhido if escolhido else candidatos[0]
 
     return mapa
 
 
-def gerar_mapa_anonimo_por_gerencia(df):
-  
+def gerar_mapa_prn(df):
+    """
+    PRN por pessoa:
+    - Entrevistado -> 'PRN'
+    - Alvo         -> 'PRN do Alvo'
+
+    Preferência: se existir PRN como Entrevistado, usa ele; senão usa PRN do Alvo.
+    """
+    mapa = {}
+    pessoas = pd.unique(df[["Entrevistado", "Alvo"]].values.ravel("K"))
+
+    for p in pessoas:
+        if pd.isna(p):
+            continue
+
+        prn_ent = df.loc[df["Entrevistado"] == p, "PRN"].dropna()
+        if not prn_ent.empty:
+            mapa[p] = str(prn_ent.iloc[0])
+            continue
+
+        prn_alv = df.loc[df["Alvo"] == p, "PRN do Alvo"].dropna()
+        mapa[p] = str(prn_alv.iloc[0]) if not prn_alv.empty else "Desconhecido"
+
+    return mapa
+
+
+def gerar_mapa_anonimo(df):
+    """Gera IDs anônimos por coordenação (estável via seed)."""
     random.seed(42)
     mapa = {}
 
-    # Consolida gerência por pessoa para garantir consistência com as cores
-    mapa_gerencia = gerar_mapa_gerencia_pessoa(df)
+    mapa_coord = gerar_mapa_coordenacao(df)
+    pessoas = [
+        p for p in pd.unique(df[["Entrevistado", "Alvo"]].values.ravel("K"))
+        if pd.notna(p)
+    ]
 
-    # Pessoas presentes no grafo (entrevistados + alvos)
-    pessoas = pd.unique(df[['Entrevistado', 'Alvo']].values.ravel('K'))
-    pessoas = [p for p in pessoas if pd.notna(p)]
-
-    # Agrupa pessoas por gerência consolidada
     agrupado = {}
     for p in pessoas:
-        ger = mapa_gerencia.get(p, 'Sem Gerência')
-        agrupado.setdefault(ger, []).append(p)
+        c = mapa_coord.get(p, "Sem Coordenação")
+        agrupado.setdefault(c, []).append(p)
 
-    # Embaralha e atribui IDs por gerência
-    for gerencia, lista in agrupado.items():
-        lista_local = list(set(lista))
-        random.shuffle(lista_local)
-        for i, nome in enumerate(lista_local, start=1):
-            mapa[nome] = {"id": i, "gerencia": gerencia}
+    for coord, lista in agrupado.items():
+        lista = list(set(lista))
+        random.shuffle(lista)
+        for i, nome in enumerate(lista, start=1):
+            mapa[nome] = {"id": i, "coordenacao": coord}
 
     return mapa
 
 
+# =========================================================
+# Gráfico de rede
+# =========================================================
 
-def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
+def criar_grafico_rede(df, mapa_anonimo, modo_anonimo=True):
     """
-    Gera o grafo com hover sem 'extra' e sem 'trace 1'.
+    modo_anonimo=True  -> Aba pública (anônima): mostra ID, sem PRN
+    modo_anonimo=False -> Aba privada: mostra iniciais e PRN no hover
     """
     try:
-        # Criação das arestas a partir do CSV
-        edges = [
-            (row['Entrevistado'], row['Alvo'])
-            for _, row in df.iterrows()
-            if pd.notna(row['Entrevistado']) and pd.notna(row['Alvo'])
-        ]
-
-        # Se não houver arestas válidas, aborta
+        # Arestas válidas: só entra se entrevistado e alvo existirem
+        edges = [(a, b) for a, b in zip(df["Entrevistado"], df["Alvo"]) if pd.notna(a) and pd.notna(b)]
         if not edges:
-            st.warning("Nenhuma aresta válida encontrada no CSV (verifique colunas 'Entrevistado' e 'Alvo').")
+            st.warning("Nenhuma aresta válida encontrada no CSV.")
             return None
 
-        # Criação do grafo não direcionado
         g = ig.Graph.TupleList(edges, directed=False)
 
-        # Mapa definitivo de gerência por pessoa (base única para cor/hover/legenda)
-        mapa_gerencia_pessoa = gerar_mapa_gerencia_pessoa(df)
-
-        # Identificação das gerências e definição da paleta de cores (estável)
-        gerencias = sorted(set(mapa_gerencia_pessoa.values()))
-        cores_paleta = [
-            '#e74c3c',  # red
-            '#3498db',  # blue
-            '#2ecc71',  # green
-            '#e67e22',  # orange
-            '#9b59b6',  # purple
-            '#8d6e63',  # brown
-            '#e91e63',  # pink
-            '#7f8c8d',  # gray
-            '#3d9970',  # olive-ish
-            '#16a085',  # teal
-        ]
-        mapa_cores = {ger: cores_paleta[i % len(cores_paleta)] for i, ger in enumerate(gerencias)}
-
-        # Listas auxiliares
-        hover_info = []
-        tamanhos = []
-        cores_nos = []
-        texto_exibicao = []
-
-        # Para cada nó do grafo
-        for nome in g.vs['name']:
-            conexoes_como_entrevistado = len(df[df['Entrevistado'] == nome])
-            conexoes_como_alvo = len(df[df['Alvo'] == nome])
-            total_conexoes = conexoes_como_entrevistado + conexoes_como_alvo
-
-            # Tamanho do nó proporcional a quantas vezes foi 'Alvo'
-            tamanhos.append(15 + (conexoes_como_alvo * 5))
-
-            # Gerência consolidada
-            gerencia_pessoa = mapa_gerencia_pessoa.get(nome, 'Sem Gerência')
-            cores_nos.append(mapa_cores.get(gerencia_pessoa, 'black'))
-
-            # Texto/hovers
-            if modo_privacidade:
-                dados_anon = mapa_anonimo[nome]
-                id_num = dados_anon["id"]
-                ger = dados_anon["gerencia"]
-
-                texto_exibicao.append(str(id_num))  # número no nó
-                # HTML real no hover (sem escapar)
-                hover_info.append(
-                    f"<b>Usuário Anônimo</b><br>"
-                    f"Identificador: {ger}-{id_num}<br>"
-                    f"Área: {ger}<br>"
-                    f"Total de Conexões: {total_conexoes}<br>"
-                    f"Como Entrevistado: {conexoes_como_entrevistado}<br>"
-                    f"Como Alvo: {conexoes_como_alvo}"
-                )
-            else:
-                texto_exibicao.append(obter_iniciais(nome))
-                hover_info.append(
-                    f"<b>{nome}</b><br>"
-                    f"Gerência: {gerencia_pessoa}<br>"
-                    f"Total de Conexões: {total_conexoes}<br>"
-                    f"Como Entrevistado: {conexoes_como_entrevistado}<br>"
-                    f"Como Alvo: {conexoes_como_alvo}"
-                )
-
-        # Layout de nós: fixa a posição para manter estabilidade entre renderizações
-        if "layout_posicoes" not in st.session_state:
+        # Layout: recalcula quando o grafo mudar (evita list index out of range)
+        sig = assinatura_grafo(g.vs["name"], edges)
+        if (
+            "layout_posicoes" not in st.session_state
+            or st.session_state.get("layout_assinatura") != sig
+            or len(st.session_state["layout_posicoes"]) != g.vcount()
+        ):
             random.seed(42)
-            layout = g.layout("fr")  # Fruchterman-Reingold
-            st.session_state["layout_posicoes"] = [(pos[0], pos[1]) for pos in layout]
+            layout_obj = g.layout("fr")
+            st.session_state["layout_posicoes"] = [(p[0], p[1]) for p in layout_obj]
+            st.session_state["layout_assinatura"] = sig
 
         layout = st.session_state["layout_posicoes"]
 
-        node_x = [pos[0] for pos in layout]
-        node_y = [pos[1] for pos in layout]
+        # Mapas auxiliares
+        mapa_coord = gerar_mapa_coordenacao(df)
+        mapa_prn = gerar_mapa_prn(df)
+
+        # Paleta por coordenação
+        coordenacoes = sorted(set(mapa_coord.values()))
+        paleta = [
+            "#e74c3c", "#3498db", "#2ecc71", "#e67e22", "#9b59b6",
+            "#8d6e63", "#e91e63", "#7f8c8d", "#3d9970", "#16a085",
+        ]
+        mapa_cores = {c: paleta[i % len(paleta)] for i, c in enumerate(coordenacoes)}
+
+        hover_info, tamanhos, cores_nos, texto = [], [], [], []
+
+        for nome in g.vs["name"]:
+            n_ent = int((df["Entrevistado"] == nome).sum())
+            n_alv = int((df["Alvo"] == nome).sum())
+            total = n_ent + n_alv
+
+            # Tamanho cresce com quantas vezes foi indicado (alvo)
+            tamanhos.append(15 + (n_alv * 5))
+
+            coord = mapa_coord.get(nome, "Sem Coordenação")
+            prn = mapa_prn.get(nome, "Desconhecido")
+            cores_nos.append(mapa_cores.get(coord, "black"))
+
+            if modo_anonimo:
+                # Público/anônimo
+                anon = mapa_anonimo.get(nome, {"id": "", "coordenacao": coord})
+                texto.append(str(anon["id"]))
+                hover_info.append(
+                    f"<b>Usuário Anônimo</b><br>"
+                    f"Identificador: {anon['coordenacao']}-{anon['id']}<br>"
+                    f"Área: {anon['coordenacao']}<br>"
+                    f"Total de Conexões: {total}<br>"
+                    f"Como Entrevistado: {n_ent}<br>"
+                    f"Como Alvo: {n_alv}"
+                )
+            else:
+                # Privado (nome e PRN)
+                texto.append(obter_iniciais(nome))
+                hover_info.append(
+                    f"<b>{nome}</b><br>"
+                    f"Coordenação: {coord}<br>"
+                    f"PRN: {prn}<br>"
+                    f"Total de Conexões: {total}<br>"
+                    f"Como Entrevistado: {n_ent}<br>"
+                    f"Como Alvo: {n_alv}"
+                )
+
+        # Coordenadas dos nós
+        node_x = [p[0] for p in layout]
+        node_y = [p[1] for p in layout]
 
         # Coordenadas das arestas
         edge_x, edge_y = [], []
-        for edge in g.es:
-            x1, y1 = layout[edge.source]
-            x2, y2 = layout[edge.target]
-            edge_x.extend([x1, x2, None])
-            edge_y.extend([y1, y2, None])
+        for e in g.es:
+            x1, y1 = layout[e.source]
+            x2, y2 = layout[e.target]
+            edge_x += [x1, x2, None]
+            edge_y += [y1, y2, None]
 
-        # Figura
         fig = go.Figure()
 
         # Arestas
-        fig.add_trace(
-            go.Scatter(
-                x=edge_x,
-                y=edge_y,
-                mode='lines',
-                line=dict(color='rgba(100,100,100,0.5)', width=1),
-                hoverinfo='skip',
-                showlegend=False,
-                name=''  # sem nome para evitar rótulos indesejados
-            )
-        )
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y,
+            mode="lines",
+            line=dict(color="rgba(100,100,100,0.5)", width=1),
+            hoverinfo="skip",
+            showlegend=False
+        ))
 
         # Nós
-        fig.add_trace(
-            go.Scatter(
-                x=node_x,
-                y=node_y,
-                mode='markers+text',
-                text=texto_exibicao,
-                hovertext=hover_info,                     
-                textposition='middle center',
-                textfont=dict(color='black', size=[max(10, int(s * 0.45)) for s in tamanhos]),
-                marker=dict(
-                    size=tamanhos,
-                    color=cores_nos,
-                    line=dict(width=1, color='white')
-                ),
-                hovertemplate='%{hovertext}<extra></extra>',  # <<< remove "trace 1" e não imprime "extra"
-                showlegend=False,
-                name=''  # sem nome para não aparecer título no hover
-            )
-        )
+        fig.add_trace(go.Scatter(
+            x=node_x, y=node_y,
+            mode="markers+text",
+            text=texto,
+            hovertext=hover_info,
+            textposition="middle center",
+            textfont=dict(color="black", size=[max(10, int(s * 0.45)) for s in tamanhos]),
+            marker=dict(size=tamanhos, color=cores_nos, line=dict(width=1, color="white")),
+            hovertemplate="%{hovertext}<extra></extra>",
+            showlegend=False
+        ))
 
-        # Legenda por gerência (um trace "fake" por cor)
-        for ger in gerencias:
-            fig.add_trace(
-                go.Scatter(
-                    x=[None], y=[None],
-                    mode='markers',
-                    marker=dict(size=10, color=mapa_cores.get(ger, 'black')),
-                    name=ger,
-                    showlegend=True
-                )
-            )
+        # Legenda
+        for c in coordenacoes:
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None],
+                mode="markers",
+                marker=dict(size=10, color=mapa_cores.get(c, "black")),
+                name=c,
+                showlegend=True
+            ))
 
         fig.update_layout(
-            plot_bgcolor='white',
+            plot_bgcolor="white",
             height=700,
-            showlegend=True,
-            hovermode='closest',
+            hovermode="closest",
             margin=dict(l=10, r=10, t=10, b=10)
         )
 
@@ -237,85 +276,76 @@ def criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False):
         return None
 
 
-# =========================================
-# Interface Streamlit
-# =========================================
+# =========================================================
+# App Streamlit
+# =========================================================
+
 def main():
     st.set_page_config(page_title="Mapeamento de Rede", layout="wide")
     st.title("🕸️ Mapeamento de Relacionamentos")
 
-    # Sidebar: instruções
     with st.sidebar:
         st.header("📋 Instruções")
         st.markdown("""
-        **Formato do arquivo CSV:**
+**Formato do arquivo CSV (colunas obrigatórias):**
+- `Entrevistado`: pessoa que fez a indicação  
+- `Alvo`: pessoa indicada  
+- `Coordenação`: coordenação do entrevistado  
+- `Coord do Alvo`: coordenação do alvo  
+- `PRN`: PRN do entrevistado  
+- `PRN do Alvo`: PRN do alvo  
 
-        O arquivo deve conter as seguintes colunas:
-
-        - `Entrevistado`: Nome da pessoa que fez a indicação  
-        - `Alvo`: Nome da pessoa indicada  
-        - `Gerencia`: Gerência da pessoa
-
-        **Exemplo:**
-        ```
-        Entrevistado,Alvo,Gerencia
-        João Silva,Maria Santos,TI
-        Maria Santos,Pedro Costa,RH
-        ```
+**Exemplo :**
+```csv
+Entrevistado,Coordenação,PRN,Alvo,Coord do Alvo,PRN do Alvo
+Maria Silva,Gerência Financeira, 123456, João Souza,Gerência TI,654321
+```
         """)
-        st.markdown("---")
-        st.markdown("**💡 Dica:** O tamanho dos nós representa o número de vezes que a pessoa foi **Alvo**.")
 
-    # Upload
-    uploaded_file = st.file_uploader("📁 Carregue o arquivo CSV", type=['csv'])
+    uploaded_file = st.file_uploader("📁 Carregue o arquivo CSV", type=["csv"])
 
     if uploaded_file:
-        # Leitura robusta (UTF-8-BOM e fallback Latin-1)
+        # Leitura com fallback de encoding
         try:
-            df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+            df = pd.read_csv(uploaded_file, encoding="utf-8-sig")
         except Exception:
-            df = pd.read_csv(uploaded_file, encoding='latin1')
+            df = pd.read_csv(uploaded_file, encoding="latin1")
 
-        # Validação mínima de colunas
-        colunas_necessarias = {'Entrevistado', 'Alvo', 'Gerencia'}
-        if not colunas_necessarias.issubset(set(df.columns)):
-            st.error(f"As colunas obrigatórias são: {sorted(colunas_necessarias)}. Encontrado: {list(df.columns)}")
+        # Remove espaços do cabeçalho (ex.: "PRN ")
+        df.columns = df.columns.str.strip()
+
+        colunas = {"Entrevistado", "Alvo", "Coordenação", "Coord do Alvo", "PRN", "PRN do Alvo"}
+        if not colunas.issubset(df.columns):
+            st.error(f"Colunas obrigatórias ausentes: {colunas - set(df.columns)}")
             return
 
-        # Mapa anônimo
-        mapa_anonimo = gerar_mapa_anonimo_por_gerencia(df)
+        # Normaliza os campos principais
+        for c in ["Entrevistado", "Alvo", "Coordenação", "Coord do Alvo", "PRN", "PRN do Alvo"]:
+            df[c] = df[c].apply(norm)
 
-        # Abas
+        mapa_anonimo = gerar_mapa_anonimo(df)
+
         tab_publica, tab_privada = st.tabs(["🔒 Aba Pública (Anônima)", "🔑 Aba Privada (Nomes Reais)"])
 
-        # Aba pública
         with tab_publica:
             st.subheader("Visualização Protegida")
-            st.info("Nesta aba, os nomes são substituídos por IDs para preservar a privacidade.")
-            fig_anon = criar_grafico_rede(df, mapa_anonimo, modo_privacidade=True)
-            if fig_anon:
-                st.plotly_chart(fig_anon, use_container_width=True)
+            fig = criar_grafico_rede(df, mapa_anonimo, modo_anonimo=True)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
 
-        # Aba privada
         with tab_privada:
             st.subheader("Área Administrativa")
-            senha = st.text_input("Insira a senha para ver os nomes reais:", type="password")
+            senha = st.text_input("Insira a senha:", type="password")
 
             if senha == SENHA_ACESSO:
-                st.success("Senha correta! Exibindo dados identificados.")
-                fig_real = criar_grafico_rede(df, mapa_anonimo, modo_privacidade=False)
-                if fig_real:
-                    st.plotly_chart(fig_real, use_container_width=True)
-                st.subheader("📊 Dados Inseridos")
+                st.success("Acesso liberado.")
+                fig = criar_grafico_rede(df, mapa_anonimo, modo_anonimo=False)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(df, use_container_width=True)
-            elif senha == "":
-                st.warning("Por favor, digite a senha para liberar o gráfico.")
-            else:
+            elif senha != "":
                 st.error("Senha incorreta.")
 
 
-# =========================================
-# Execução
-# =========================================
 if __name__ == "__main__":
     main()
